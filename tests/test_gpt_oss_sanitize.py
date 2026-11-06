@@ -75,6 +75,16 @@ class TestGptOssSanitize(unittest.TestCase):
             ).item()
         )
 
+    def test_hf_layout_weights_are_contiguous(self):
+        # The HF path transposes; the results must be materialized so the
+        # expert weights share the memory layout of a converted checkpoint.
+        E, D, I = 2, 4, 4
+        s = _model(D, I, E).sanitize(_hf_weights(E, D, I))
+        for name in ("gate_proj.weight", "up_proj.weight", "down_proj.weight"):
+            v = s[P + name]
+            mx.eval(v)
+            self.assertTrue(memoryview(v).c_contiguous, name)
+
     def test_already_sanitized_passthrough(self):
         E, D, I = 2, 4, 3
         weights = {P + "gate_proj.weight": mx.zeros((E, I, D))}
