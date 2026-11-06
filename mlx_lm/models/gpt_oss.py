@@ -221,6 +221,18 @@ class Model(nn.Module):
         if any("gate_proj.weight" in k for k in weights.keys()):
             return weights  # already sanitized
 
+        # HF/unsloth BF16 checkpoints store gate_up_proj as (E, D, 2I) and
+        # down_proj as (E, I, D), without a ".weight" suffix. Detect once:
+        # down_proj is ambiguous when I == D.
+        D, I = self.args.hidden_size, self.args.intermediate_size
+        hf_layout = any(
+            k.endswith("gate_up_proj")
+            and v.ndim == 3
+            and v.shape[-2:] != (2 * I, D)
+            and v.shape[-2:] == (D, 2 * I)
+            for k, v in weights.items()
+        )
+
         new_weights = {}
         for k, v in weights.items():
             if "gate_up_proj" in k and "bias" not in k:
@@ -229,6 +241,9 @@ class Model(nn.Module):
                     k = k.replace("_blocks", ".weight")
                 if "_scales" in k:
                     k = k.replace("_scales", ".scales")
+                if hf_layout and k.endswith("gate_up_proj"):
+                    v = v.swapaxes(-1, -2)
+                    k = k + ".weight"
                 new_weights[k.replace("gate_up_proj", "gate_proj")] = mx.contiguous(
                     v[..., ::2, :]
                 )
@@ -241,6 +256,9 @@ class Model(nn.Module):
                     k = k.replace("_blocks", ".weight")
                 if "_scales" in k:
                     k = k.replace("_scales", ".scales")
+                if hf_layout and k.endswith("down_proj"):
+                    v = v.swapaxes(-1, -2)
+                    k = k + ".weight"
                 new_weights[k] = v
             elif "gate_up_proj_bias" in k:
                 new_weights[k.replace("gate_up_proj_bias", "gate_proj.bias")] = (
