@@ -257,7 +257,7 @@ class Model(nn.Module):
                 if "_scales" in k:
                     k = k.replace("_scales", ".scales")
                 if hf_layout and k.endswith("down_proj"):
-                    v = v.swapaxes(-1, -2)
+                    v = mx.contiguous(v.swapaxes(-1, -2))
                     k = k + ".weight"
                 new_weights[k] = v
             elif "gate_up_proj_bias" in k:
