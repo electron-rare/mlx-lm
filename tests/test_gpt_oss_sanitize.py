@@ -118,6 +118,71 @@ class TestGptOssSanitize(unittest.TestCase):
             self.assertTrue(mx.array_equal(s[P + "down_proj"], dp).item())
             self.assertEqual(s[P + "gate_proj.bias"].shape, (E, I))
 
+    def test_hf_bias_values_and_dtype(self):
+        E, D, I = 2, 4, 4
+        w = _hf_weights(E, D, I)
+        gb = mx.arange(E * 2 * I).reshape(E, 2 * I)
+        db = mx.arange(E * D).reshape(E, D)
+        w[P + "gate_up_proj_bias"] = gb
+        w[P + "down_proj_bias"] = db
+        w = {k: v.astype(mx.bfloat16) for k, v in w.items()}
+        gb, db = gb.astype(mx.bfloat16), db.astype(mx.bfloat16)
+        s = _model(D, I, E).sanitize(w)
+        self.assertTrue(mx.array_equal(s[P + "gate_proj.bias"], gb[..., ::2]).item())
+        self.assertTrue(mx.array_equal(s[P + "up_proj.bias"], gb[..., 1::2]).item())
+        self.assertTrue(mx.array_equal(s[P + "down_proj.bias"], db).item())
+        for k, v in s.items():
+            self.assertEqual(v.dtype, mx.bfloat16, k)
+
+    def test_openai_layout_with_weight_suffix_preserved(self):
+        # openai layout with an explicit ".weight" suffix on the input keys
+        for D, I in ((4, 4), (5, 3)):
+            E = 2
+            gu = mx.arange(E * 2 * I * D, dtype=mx.float32).reshape(E, 2 * I, D)
+            dp = mx.arange(E * D * I, dtype=mx.float32).reshape(E, D, I)
+            weights = {
+                P + "gate_up_proj.weight": gu,
+                P + "down_proj.weight": dp,
+                P + "gate_up_proj_bias": mx.zeros((E, 2 * I)),
+                P + "down_proj_bias": mx.zeros((E, D)),
+            }
+            s = _model(D, I, E).sanitize(weights)
+            self.assertTrue(
+                mx.array_equal(s[P + "gate_proj.weight"], gu[..., ::2, :]).item()
+            )
+            self.assertTrue(
+                mx.array_equal(s[P + "up_proj.weight"], gu[..., 1::2, :]).item()
+            )
+            self.assertTrue(mx.array_equal(s[P + "down_proj.weight"], dp).item())
+            self.assertEqual(s[P + "gate_proj.bias"].shape, (E, I))
+
+    def test_mxfp4_keys_not_detected_as_hf(self):
+        E, D, I = 2, 64, 64
+        u8 = mx.uint8
+        weights = {
+            P + "gate_up_proj_blocks": mx.zeros((E, 2 * I, D // 32, 16), dtype=u8),
+            P + "gate_up_proj_scales": mx.zeros((E, 2 * I, D // 32), dtype=u8),
+            P + "down_proj_blocks": mx.zeros((E, D, I // 32, 16), dtype=u8),
+            P + "down_proj_scales": mx.zeros((E, D, I // 32), dtype=u8),
+            P + "gate_up_proj_bias": mx.zeros((E, 2 * I)),
+            P + "down_proj_bias": mx.zeros((E, D)),
+        }
+        s = _model(D, I, E).sanitize(weights)
+        # blocks: uint8 (.., D // 32, 16) -> view uint32 (.., D // 32, 4) -> flatten
+        # gives D // 32 * 4 = 8 packed words per row (I // 32 * 4 for down).
+        expected = {
+            P + "gate_proj.weight": (E, I, 8),
+            P + "up_proj.weight": (E, I, 8),
+            P + "down_proj.weight": (E, D, 8),
+            P + "gate_proj.scales": (E, I, 2),
+            P + "up_proj.scales": (E, I, 2),
+            P + "down_proj.scales": (E, D, 2),
+            P + "gate_proj.bias": (E, I),
+            P + "up_proj.bias": (E, I),
+            P + "down_proj.bias": (E, D),
+        }
+        self.assertEqual({k: v.shape for k, v in s.items()}, expected)
+
 
 if __name__ == "__main__":
     unittest.main()
